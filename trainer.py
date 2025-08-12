@@ -93,11 +93,11 @@ def train():
         replay_buffer = load_training_data(TRAINING_DATA_PATH)
     
     # 调整续训时的学习率
-    if start_batch > 0:
-        steps_to_skip = start_batch // update_epochs
-        for _ in range(steps_to_skip):
-            scheduler.step()
-        print(f"续训时调整学习率为: {optimizer.param_groups[0]['lr']:.6f}")
+    # if start_batch > 0:
+    #     steps_to_skip = start_batch // update_epochs
+    #     for _ in range(steps_to_skip):
+    #         scheduler.step()
+    #     print(f"续训时调整学习率为: {optimizer.param_groups[0]['lr']:.6f}")
     
     # 主训练循环
     print(f"初始回放缓冲区大小: {len(replay_buffer)}")
