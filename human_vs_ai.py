@@ -12,7 +12,7 @@ class AIPlayer:
         
         # 提取网络配置参数
         board_size = checkpoint.get('board_size', 3)
-        res_blocks = checkpoint.get('res_blocks', 2)
+        res_blocks = checkpoint.get('res_blocks', 1)
         channels = checkpoint.get('channels', [16, 32])
         
         # 使用提取的参数初始化策略价值网络
@@ -29,7 +29,8 @@ class AIPlayer:
             self.policy_value_net.load_state_dict(checkpoint)
         
         self.policy_value_net.eval()
-        self.mcts = MCTS(self.policy_value_net, n_playout=100)
+        self.mcts = MCTS(self.policy_value_net, c_puct=0.0, n_playout=100)
+
         self.player_id = player_id  # 记录AI的玩家编号（1或2）
         self.board_size = board_size  # 保存棋盘大小供外部使用
     
@@ -46,7 +47,8 @@ class AIPlayer:
 def human_vs_ai():
     # 加载模型以获取棋盘参数
     try:
-        model_path = "checkpoint/temp_model_4900.pth"
+        model_path = "tictactoe/final_model.pth"
+
         checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
         board_size = checkpoint.get('board_size', 3)
         win_length = checkpoint.get('win_length', 3)

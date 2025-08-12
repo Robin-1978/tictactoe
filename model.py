@@ -38,23 +38,27 @@ class PolicyValueNet(nn.Module):
         self.conv1 = nn.Conv2d(3, channels[0], kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(channels[0])
 
+        self.conv2 = nn.Conv2d(channels[0], channels[1], kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels[1])
+
+
         # 添加残差块
-        self.res_blocks = nn.ModuleList()
-        for i in range(num_res_blocks):
-            in_ch = channels[i]
-            out_ch = channels[i+1]
-            self.res_blocks.append(ResidualBlock(in_ch, out_ch))
+        # self.res_blocks = nn.ModuleList()
+        # for i in range(num_res_blocks):
+        #     in_ch = channels[i]
+        #     out_ch = channels[i+1]
+        #     self.res_blocks.append(ResidualBlock(in_ch, out_ch))
 
         # 策略头
         # 动态计算策略头通道数：channels[-1]的1/8，最小为8
-        policy_channels = max(channels[-1] // 8, 8)
+        policy_channels = max(channels[-1] // 4, 8)
         self.policy_conv = nn.Conv2d(channels[-1], policy_channels, kernel_size=1)
         self.policy_bn = nn.BatchNorm2d(policy_channels)
         self.policy_fc = nn.Linear(policy_channels * board_size * board_size, board_size * board_size)
 
         # 价值头
         # 动态计算价值头通道数：channels[-1]的1/16，最小为4
-        value_channels = max(channels[-1] // 16, 4)
+        value_channels = max(channels[-1] // 8, 4)
         self.value_conv = nn.Conv2d(channels[-1], value_channels, kernel_size=1)
         self.value_bn = nn.BatchNorm2d(value_channels)
         self.value_fc1 = nn.Linear(value_channels * board_size * board_size, 32)
@@ -65,9 +69,9 @@ class PolicyValueNet(nn.Module):
 
     def forward(self, state):
         x = F.relu(self.bn1(self.conv1(state)))
-        for block in self.res_blocks:
-            x = block(x)
-
+        # for block in self.res_blocks:
+        #     x = block(x)
+        x = F.relu(self.bn2(self.conv2(x)))
         # 策略头
         policy = F.relu(self.policy_bn(self.policy_conv(x)))
         policy = policy.view(-1, self.policy_conv.out_channels * self.board_size * self.board_size)
