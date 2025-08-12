@@ -30,7 +30,7 @@ def save_training_data(replay_buffer, file_path):
     probs = np.array([item[1] for item in replay_buffer], dtype=np.float32)
     rewards = np.array([item[2] for item in replay_buffer], dtype=np.float32)
     np.savez(file_path, states=states, probs=probs, rewards=rewards)
-    print(f"已保存训练数据至 {file_path}")
+    print(f"已保存 {len(replay_buffer)} 条训练数据至 {file_path}，文件大小: {os.path.getsize(file_path)/1024/1024:.2f} MB")
 
 def load_training_data(file_path):
     """从文件加载训练数据"""
@@ -56,6 +56,11 @@ def train():
     game_batch_num = 5000  # 总训练轮次
     update_epochs = 10    # 每N轮自我对弈后更新一次模型
     checkpoint_freq = 100  # 模型保存频率
+    c_puct = 1.0
+    tau = 1.0
+    n_playout = 100
+
+
     os.makedirs("checkpoint", exist_ok=True)  # 确保检查点目录存在
     
     # 检查训练进度，支持断点续训
@@ -67,7 +72,7 @@ def train():
             progress = json.load(f) 
             start_batch = progress.get('last_batch', 0)
             if start_batch > 0:
-                model_path = f"checkpoint/model_{start_batch}.pth"
+                model_path = f"checkpoint/temp_model_{start_batch}.pth"
                 print(f"发现历史进度，将从模型 {model_path} 继续训练")
             print(f"从批次 {start_batch} 开始训练")
     
@@ -95,10 +100,10 @@ def train():
         print(f"续训时调整学习率为: {optimizer.param_groups[0]['lr']:.6f}")
     
     # 主训练循环
+    print(f"初始回放缓冲区大小: {len(replay_buffer)}")
     for i in range(start_batch, game_batch_num):
-        # 自我对弈生成一局数据
         game.reset()
-        mcts = MCTS(policy_value_net, c_puct=1.0, n_playout=100)  # MCTS搜索次数
+        mcts = MCTS(policy_value_net, c_puct=c_puct, n_playout=n_playout)  # MCTS搜索次数
 
         play_data = []  # 存储单局数据：(state, current_player, move, probs)
         winner = None   # 最终胜负：1（黑胜）/2（白胜）/0（平局）
@@ -106,7 +111,8 @@ def train():
         while True:
             state = game.get_state()  # 获取当前棋盘状态（需返回可序列化格式）
             current_player = game.current_player  # 当前落子方（1或2）
-            moves, probs = mcts.get_move_probs(game, temp=1)  # 获取合法动作及概率
+            moves, probs = mcts.get_move_probs(game, temp=tau)  # 获取合法动作及概率
+
             
             if not moves:  # 无合法动作
                 break
@@ -142,6 +148,10 @@ def train():
                 break
             mcts.update_with_move(move)  # MCTS更新当前动作
         
+        # 每局结束后打印缓冲区大小
+        # if (i * num_games_per_batch + game_idx + 1) % 10 == 0:
+        #     print(f"已完成 {i * num_games_per_batch + game_idx + 1} 局游戏，回放缓冲区大小: {len(replay_buffer)}")
+
         # 将单局数据转换为训练样本（带立场化奖励）并加入回放缓存
         for state, current_player, move, probs in play_data:
             # 计算立场化奖励：当前玩家获胜则+1，失败则-1，平局则0
@@ -152,10 +162,17 @@ def train():
             else:
                 reward = -1.0  # 当前玩家失败
             replay_buffer.append((state, probs, reward))
-        
+
         # 控制缓存大小（超出则删除最早数据）
         if len(replay_buffer) > buffer_size:
-            replay_buffer.pop(0)
+            # 计算需要删除的数据量
+            num_to_remove = len(replay_buffer) - buffer_size
+            replay_buffer = replay_buffer[num_to_remove:]
+            print(f"回放缓冲区超过最大容量，删除最早的 {num_to_remove} 条数据")
+        
+        # 控制缓存大小（超出则删除最早数据）
+        # if len(replay_buffer) > buffer_size:
+        #     replay_buffer.pop(0)
         
         # 每update_epochs轮迭代更新一次模型
         if i % update_epochs == 0 and i != 0 and len(replay_buffer) >= batch_size:
@@ -200,7 +217,7 @@ def train():
             # 反向传播与参数更新
             total_loss.backward()
             optimizer.step()
-            scheduler.step()
+            scheduler.step()  # 在PyTorch中，应在optimizer.step()后调用scheduler.step()
             
             # 打印训练信息
             print(f"批次 {i}, 学习率: {optimizer.param_groups[0]['lr']:.6f}, "
