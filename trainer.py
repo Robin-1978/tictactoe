@@ -21,6 +21,33 @@ WIN_LENGTH = 3
 # 神经网络配置
 RES_BLOCKS = 1  # 残差块数量
 CHANNELS = [16, 32]  # 各层通道数，长度应等于残差块数量+1
+# 训练数据保存路径
+TRAINING_DATA_PATH = "checkpoint/training_data.npz"
+
+def save_training_data(replay_buffer, file_path):
+    """保存训练数据到文件"""
+    states = np.array([item[0] for item in replay_buffer], dtype=np.float32)
+    probs = np.array([item[1] for item in replay_buffer], dtype=np.float32)
+    rewards = np.array([item[2] for item in replay_buffer], dtype=np.float32)
+    np.savez(file_path, states=states, probs=probs, rewards=rewards)
+    print(f"已保存训练数据至 {file_path}")
+
+def load_training_data(file_path):
+    """从文件加载训练数据"""
+    if not os.path.exists(file_path):
+        print(f"训练数据文件 {file_path} 不存在，将使用空缓存")
+        return []
+    try:
+        data = np.load(file_path)
+        states = data['states']
+        probs = data['probs']
+        rewards = data['rewards']
+        replay_buffer = [(states[i], probs[i], rewards[i]) for i in range(len(states))]
+        print(f"已加载 {len(replay_buffer)} 条训练数据")
+        return replay_buffer
+    except Exception as e:
+        print(f"加载训练数据出错: {e}")
+        return []
 
 def train():
     replay_buffer = []  # 存储格式：(state, probs, reward)，其中reward基于当前玩家视角
@@ -50,13 +77,15 @@ def train():
     optimizer = Adam(policy_value_net.parameters(), lr=0.001)
     scheduler = StepLR(optimizer, step_size=100, gamma=0.7)  # 学习率衰减
     
-    # 加载历史模型（如有）
+    # 加载历史模型和训练数据（如有）
     if model_path and os.path.exists(model_path):
         checkpoint = torch.load(model_path)
         policy_value_net.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         print(f"已加载模型、优化器和调度器状态")
+        # 加载训练数据
+        replay_buffer = load_training_data(TRAINING_DATA_PATH)
     
     # 调整续训时的学习率
     if start_batch > 0:
@@ -219,16 +248,25 @@ def train():
             with open(progress_file, 'w') as f:
                 json.dump({'last_batch': i}, f)
             print(f"已保存训练进度至 {progress_file}")
+            
+            # 保存训练数据
+            save_training_data(replay_buffer, TRAINING_DATA_PATH)
     
-    # 训练结束，保存最终模型
+    # 训练结束，保存最终模型和数据
     torch.save({
         'model_state_dict': policy_value_net.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
+        'board_size': BOARD_SIZE,
+        'win_length': WIN_LENGTH,
+        'res_blocks': RES_BLOCKS,
+        'channels': CHANNELS
     }, "checkpoint/final_model.pth")
     with open(progress_file, 'w') as f:
         json.dump({'last_batch': game_batch_num}, f)
-    print("训练结束，已保存最终模型和进度")
+    # 保存最终训练数据
+    save_training_data(replay_buffer, TRAINING_DATA_PATH)
+    print("训练结束，已保存最终模型、进度和训练数据")
 
 
 def compare_models(model_path1, model_path2, num_games=10):
