@@ -220,10 +220,12 @@ def train():
             # 计算损失
             optimizer.zero_grad()
             policy, value = policy_value_net(state_tensor)
-            policy_valid = policy.masked_select(mask_tensor)  # 按掩码筛选网络输出的合法位置概率
-            probs_valid = probs_tensor.masked_select(mask_tensor)  # 按掩码筛选MCTS的合法位置概率
+            mask_tensor = mask_tensor.float()
+
+            # policy_valid = policy.masked_select(mask_tensor)  # 按掩码筛选网络输出的合法位置概率
+            # probs_valid = probs_tensor.masked_select(mask_tensor)  # 按掩码筛选MCTS的合法位置概率
             # 策略损失（交叉熵）
-            policy_loss = -torch.mean(torch.sum(probs_tensor * policy, dim=1))
+            policy_loss = -torch.mean(torch.sum(probs_tensor * policy * mask_tensor, dim=1))
             # policy_loss = -torch.mean(probs_valid * policy_valid)  # 避免log(0)
             # 价值损失（MSE）
             value_loss = F.mse_loss(value.view(-1), reward_tensor)
