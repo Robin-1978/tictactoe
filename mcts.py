@@ -73,7 +73,7 @@ class MCTS:
             if winner == 0:
                 value = 0.0
             else:
-                value = -1.0 if winner == game.current_player else 1.0
+                value = 1.0 if winner == 1 else -1.0
             # 回溯更新
             for _ in moves:
                 node = node.parent

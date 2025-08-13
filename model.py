@@ -28,7 +28,7 @@ class ResidualBlock(nn.Module):
         return x
 
 class PolicyValueNet(nn.Module):
-    def __init__(self, board_size=3, num_res_blocks=2, channels=[16, 32, 32]):
+    def __init__(self, board_size=3, num_res_blocks=1, channels=[8, 16]):
         super(PolicyValueNet, self).__init__()
         self.board_size = board_size
         self.num_res_blocks = num_res_blocks
@@ -51,18 +51,18 @@ class PolicyValueNet(nn.Module):
 
         # 策略头
         # 动态计算策略头通道数：channels[-1]的1/8，最小为8
-        policy_channels = max(channels[-1] // 4, 8)
+        policy_channels = max(channels[-1] // 2, 2)
         self.policy_conv = nn.Conv2d(channels[-1], policy_channels, kernel_size=1)
         self.policy_bn = nn.BatchNorm2d(policy_channels)
         self.policy_fc = nn.Linear(policy_channels * board_size * board_size, board_size * board_size)
 
         # 价值头
         # 动态计算价值头通道数：channels[-1]的1/16，最小为4
-        value_channels = max(channels[-1] // 8, 4)
+        value_channels = max(channels[-1] // 4, 1)
         self.value_conv = nn.Conv2d(channels[-1], value_channels, kernel_size=1)
         self.value_bn = nn.BatchNorm2d(value_channels)
-        self.value_fc1 = nn.Linear(value_channels * board_size * board_size, 32)
-        self.value_fc2 = nn.Linear(32, 1)
+        self.value_fc1 = nn.Linear(value_channels * board_size * board_size, channels[-1])
+        self.value_fc2 = nn.Linear(channels[-1], 1)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(self.device)

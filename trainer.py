@@ -20,7 +20,7 @@ BOARD_SIZE = 3
 WIN_LENGTH = 3
 # 神经网络配置
 RES_BLOCKS = 1  # 残差块数量
-CHANNELS = [16, 32]  # 各层通道数，长度应等于残差块数量+1
+CHANNELS = [8, 16]  # 各层通道数，长度应等于残差块数量+1
 # 训练数据保存路径
 TRAINING_DATA_PATH = "checkpoint/training_data.npz"
 
@@ -29,7 +29,9 @@ def save_training_data(replay_buffer, file_path):
     states = np.array([item[0] for item in replay_buffer], dtype=np.float32)
     probs = np.array([item[1] for item in replay_buffer], dtype=np.float32)
     rewards = np.array([item[2] for item in replay_buffer], dtype=np.float32)
-    np.savez(file_path, states=states, probs=probs, rewards=rewards)
+    masks = np.array([item[3] for item in replay_buffer], dtype=bool)  # 新增：提取掩码
+
+    np.savez(file_path, states=states, probs=probs, rewards=rewards, masks=masks)
     print(f"已保存 {len(replay_buffer)} 条训练数据至 {file_path}，文件大小: {os.path.getsize(file_path)/1024/1024:.2f} MB")
 
 def load_training_data(file_path):
@@ -42,7 +44,9 @@ def load_training_data(file_path):
         states = data['states']
         probs = data['probs']
         rewards = data['rewards']
-        replay_buffer = [(states[i], probs[i], rewards[i]) for i in range(len(states))]
+        masks = data['masks']  # 新增：加载掩码
+        
+        replay_buffer = [(states[i], probs[i], rewards[i], masks[i]) for i in range(len(states))]  # 新增：包含掩码
         print(f"已加载 {len(replay_buffer)} 条训练数据")
         return replay_buffer
     except Exception as e:
@@ -51,14 +55,15 @@ def load_training_data(file_path):
 
 def train():
     replay_buffer = []  # 存储格式：(state, probs, reward)，其中reward基于当前玩家视角
-    buffer_size = 20000  # 回放缓存大小
+    buffer_size = 10000  # 回放缓存大小
     batch_size = 64      # 训练批次大小
     game_batch_num = 5000  # 总训练轮次
     update_epochs = 10    # 每N轮自我对弈后更新一次模型
     checkpoint_freq = 100  # 模型保存频率
-    c_puct = 1.0
-    tau = 1.0
+    c_puct = 2.0 # 2.0 1.5 1.0
+    tau = 1.0 # 1.0 0.5 0
     n_playout = 100
+    value_alpha = 0.04
 
 
     os.makedirs("checkpoint", exist_ok=True)  # 确保检查点目录存在
@@ -80,7 +85,7 @@ def train():
     game = Game(board_size=BOARD_SIZE, win_length=WIN_LENGTH)
     policy_value_net = PolicyValueNet(board_size=BOARD_SIZE, num_res_blocks=RES_BLOCKS, channels=CHANNELS)
     optimizer = Adam(policy_value_net.parameters(), lr=0.001)
-    scheduler = StepLR(optimizer, step_size=100, gamma=0.7)  # 学习率衰减
+    scheduler = StepLR(optimizer, step_size=100, gamma=0.8)  # 学习率衰减
     
     # 加载历史模型和训练数据（如有）
     if model_path and os.path.exists(model_path):
@@ -161,14 +166,18 @@ def train():
                 reward = 1.0  # 当前玩家获胜
             else:
                 reward = -1.0  # 当前玩家失败
-            replay_buffer.append((state, probs, reward))
+            empty_positions = (state[0] == 0) & (state[1] == 0)
+            mask = empty_positions.flatten()  # 展平为9维（3×3）
+
+
+            replay_buffer.append((state, probs, reward, mask))
 
         # 控制缓存大小（超出则删除最早数据）
         if len(replay_buffer) > buffer_size:
             # 计算需要删除的数据量
             num_to_remove = len(replay_buffer) - buffer_size
             replay_buffer = replay_buffer[num_to_remove:]
-            print(f"回放缓冲区超过最大容量，删除最早的 {num_to_remove} 条数据")
+            # print(f"回放缓冲区超过最大容量，删除最早的 {num_to_remove} 条数据")
         
         # 控制缓存大小（超出则删除最早数据）
         # if len(replay_buffer) > buffer_size:
@@ -178,41 +187,48 @@ def train():
         if i % update_epochs == 0 and i != 0 and len(replay_buffer) >= batch_size:
             # 从回放缓存采样（使用优先级采样，无平滑处理）
             # 1. 计算所有样本的价值误差（预测值与真实奖励的差距）
-            with torch.no_grad():
-                # 批量转换状态为张量
-                states_np = np.array([s[0] for s in replay_buffer], dtype=np.float32)
-                state_tensor = torch.FloatTensor(states_np).to(policy_value_net.device)
-                # 模型预测价值
-                _, values = policy_value_net(state_tensor)
-                values_np = values.cpu().numpy().flatten()  # 转换为numpy数组
+            # with torch.no_grad():
+            #     # 批量转换状态为张量
+            #     states_np = np.array([s[0] for s in replay_buffer], dtype=np.float32)
+            #     state_tensor = torch.FloatTensor(states_np).to(policy_value_net.device)
+            #     # 模型预测价值
+            #     _, values = policy_value_net(state_tensor)
+            #     values_np = values.cpu().numpy().flatten()  # 转换为numpy数组
             
             # 2. 计算优先级（基于绝对误差，无平滑）
-            rewards_np = np.array([s[2] for s in replay_buffer], dtype=np.float32)
-            value_errors = np.abs(values_np - rewards_np) + 1e-6  # 误差（加小值避免为0）
-            priorities = value_errors  # 直接用误差作为优先级（无平滑/归一化）
-            priorities = priorities / np.sum(priorities)  # 归一化概率分布
+            # rewards_np = np.array([s[2] for s in replay_buffer], dtype=np.float32)
+            # value_errors = np.abs(values_np - rewards_np) + 1e-6  # 误差（加小值避免为0）
+            # priorities = value_errors  # 直接用误差作为优先级（无平滑/归一化）
+            # priorities = value_errors ** value_alpha  # 指数平滑（alpha=0.04）
+            # priorities = priorities / np.sum(priorities)  # 归一化概率分布
             
             # 3. 基于优先级采样
-            sample_indices = np.random.choice(len(replay_buffer), batch_size, p=priorities)
+            # sample_indices = np.random.choice(len(replay_buffer), batch_size, p=priorities)
             # 提取采样后的批次数据
+
+            sample_indices = np.random.choice(len(replay_buffer), batch_size)
             state_batch = np.array([replay_buffer[idx][0] for idx in sample_indices], dtype=np.float32)
             probs_batch = np.array([replay_buffer[idx][1] for idx in sample_indices], dtype=np.float32)
             reward_batch = np.array([replay_buffer[idx][2] for idx in sample_indices], dtype=np.float32)
-            
+            mask_batch = np.array([replay_buffer[idx][3] for idx in sample_indices], dtype=bool)  # 新增：提取掩码
+
             # 4. 转换为张量并训练
             state_tensor = torch.FloatTensor(state_batch).to(policy_value_net.device)
             probs_tensor = torch.FloatTensor(probs_batch).to(policy_value_net.device)
             reward_tensor = torch.FloatTensor(reward_batch).to(policy_value_net.device)
-            
+            mask_tensor = torch.BoolTensor(mask_batch).to(policy_value_net.device)  # 掩码张量
             # 计算损失
             optimizer.zero_grad()
             policy, value = policy_value_net(state_tensor)
+            policy_valid = policy.masked_select(mask_tensor)  # 按掩码筛选网络输出的合法位置概率
+            probs_valid = probs_tensor.masked_select(mask_tensor)  # 按掩码筛选MCTS的合法位置概率
             # 策略损失（交叉熵）
             policy_loss = -torch.mean(torch.sum(probs_tensor * policy, dim=1))
+            # policy_loss = -torch.mean(probs_valid * policy_valid)  # 避免log(0)
             # 价值损失（MSE）
             value_loss = F.mse_loss(value.view(-1), reward_tensor)
             # 总损失（价值损失加权）
-            total_loss = policy_loss + 1.5 * value_loss
+            total_loss = policy_loss + 1.0 * value_loss
             
             # 反向传播与参数更新
             total_loss.backward()

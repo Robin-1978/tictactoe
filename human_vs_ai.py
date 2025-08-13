@@ -29,13 +29,14 @@ class AIPlayer:
             self.policy_value_net.load_state_dict(checkpoint)
         
         self.policy_value_net.eval()
-        self.mcts = MCTS(self.policy_value_net, c_puct=0.0, n_playout=100)
+        self.mcts = MCTS(self.policy_value_net, c_puct=1.0, n_playout=100)
 
         self.player_id = player_id  # 记录AI的玩家编号（1或2）
         self.board_size = board_size  # 保存棋盘大小供外部使用
     
     def get_move(self, game):
         moves, probs = self.mcts.get_move_probs(game, temp=0)
+        print("MCTS搜索后策略:", probs)
         if not moves:
             return None
         max_prob_idx = np.argmax(probs)
@@ -47,7 +48,7 @@ class AIPlayer:
 def human_vs_ai():
     # 加载模型以获取棋盘参数
     try:
-        model_path = "tictactoe/final_model.pth"
+        model_path = "checkpoint/final_model.pth"
 
         checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
         board_size = checkpoint.get('board_size', 3)
