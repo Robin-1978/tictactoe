@@ -63,44 +63,56 @@ class MCTS:
         if moves:  # 确保moves非空（有落子才可能获胜）
             if game.check_win(*moves[-1]):
                 end = True
-                winner = game.current_player  # 获胜方是上一个落子的玩家（因为current_player已切换）
+                # 注意：make_move 若胜利不会切换 current_player，此时 current_player 即为获胜方
+                winner = game.current_player
         if not end and game.is_full():
             end = True
             winner = 0  # 平局
         
         if end:
-            # 终端节点价值计算（当前玩家视角：若对手获胜，价值为-1）
+            # 终局：以叶子节点（当前棋盘状态中 current_player）的视角计算价值
             if winner == 0:
-                value = 0.0
+                v = 0.0
             else:
-                value = 1.0 if winner == 1 else -1.0
-            # 回溯更新
-            for _ in moves:
-                node = node.parent
-                node.visits += 1
-                node.value_sum += value
-                value = -value  # 切换视角
+                v = 1.0 if winner == game.current_player else -1.0
+            # 自叶子开始回溯，并逐层取反
+            cur = node
+            while cur is not None:
+                cur.visits += 1
+                cur.value_sum += v
+                v = -v
+                cur = cur.parent
             return
         
         # 扩展阶段：用模型预测策略和价值
         policy, value = self.policy_value_net.predict(np.array([game.get_state()]))
         policy = np.exp(policy[0])  # 从log_softmax转换为概率
         legal_moves = game.get_legal_moves()
-        # 只保留合法落子的概率，非法的设为0
+        # 只保留合法落子的概率，并在合法集合内归一化
         action_probs = []
+        legal_priors = []
         for move in legal_moves:
-            idx = move[0] * self.board_size + move[1]  # 使用动态棋盘大小
-            action_probs.append((move, policy[idx]))
+            idx = move[0] * self.board_size + move[1]
+            legal_priors.append(policy[idx])
+        pri_sum = float(np.sum(legal_priors))
+        if pri_sum <= 0 or not np.isfinite(pri_sum):
+            # 均匀分布兜底
+            norm_priors = [1.0 / max(len(legal_moves), 1)] * len(legal_moves)
+        else:
+            norm_priors = [p / pri_sum for p in legal_priors]
+        for move, p in zip(legal_moves, norm_priors):
+            action_probs.append((move, p))
         # 扩展子节点
         node.expand(action_probs)
         
-        # 回溯更新
-        value = value[0][0]  # 模型预测的价值（当前玩家视角）
-        for _ in moves:
-            node = node.parent
-            node.visits += 1
-            node.value_sum += value
-            value = -value  # 切换视角
+        # 回溯更新（包含叶子）：模型价值为叶子 current_player 视角
+        v = float(value[0][0])
+        cur = node
+        while cur is not None:
+            cur.visits += 1
+            cur.value_sum += v
+            v = -v
+            cur = cur.parent
     
     def get_move_probs(self, game, temp=1e-3):
         # 多次模拟后返回落子概率

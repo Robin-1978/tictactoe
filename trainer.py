@@ -55,7 +55,7 @@ def load_training_data(file_path):
 
 def train():
     replay_buffer = []  # 存储格式：(state, probs, reward)，其中reward基于当前玩家视角
-    buffer_size = 10000  # 回放缓存大小
+    buffer_size = 3000  # 回放缓存大小
     batch_size = 64      # 训练批次大小
     game_batch_num = 5000  # 总训练轮次
     update_epochs = 10    # 每N轮自我对弈后更新一次模型
@@ -454,7 +454,7 @@ def compare2_models(model_path1, model_path2, num_games=10):
     
     # 计算胜率（平局按0.6胜计算，鼓励接近最优的模型）
     total = wins1 + wins2 + draws
-    win_rate = (wins1 + 0.6 * draws) / total * 100 if total > 0 else 50.0
+    win_rate = (wins1 + 0.5 * draws) / total * 100 if total > 0 else 50.0
     return win_rate
 
 if __name__ == "__main__":
