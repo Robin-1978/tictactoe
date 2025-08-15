@@ -47,10 +47,16 @@ class Game:
         return np.all(self.board != 0)
 
     def get_state(self):
+        """
+        AlphaZero标准状态表示：
+        第0层: 玩家1(X)的棋子
+        第1层: 玩家2(O)的棋子  
+        第2层: 当前玩家标识 (1表示玩家1的回合，0表示玩家2的回合)
+        """
         state = np.zeros((3, self.board_size, self.board_size), dtype=int)
-        state[0] = (self.board == 1).astype(int)
-        state[1] = (self.board == 2).astype(int)
-        state[2] = int(self.current_player == 1)
+        state[0] = (self.board == 1).astype(int)  # 玩家1(X)
+        state[1] = (self.board == 2).astype(int)  # 玩家2(O)
+        state[2] = int(self.current_player == 1)  # 当前玩家标识
         return state
 
     def reset(self):

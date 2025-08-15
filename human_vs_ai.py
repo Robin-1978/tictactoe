@@ -10,16 +10,18 @@ class AIPlayer:
         # 加载检查点，提取模型状态字典和参数
         checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
         
-        # 提取网络配置参数
+        # 提取网络配置参数 - 适配新架构
         board_size = checkpoint.get('board_size', 3)
-        res_blocks = checkpoint.get('res_blocks', 1)
-        channels = checkpoint.get('channels', [16, 32])
+        input_channels = checkpoint.get('input_channels', 64)
+        res_channels = checkpoint.get('res_channels', [32, 64])
+        dropout_rate = checkpoint.get('dropout_rate', 0.0)
         
         # 使用提取的参数初始化策略价值网络
         self.policy_value_net = PolicyValueNet(
             board_size=board_size,
-            num_res_blocks=res_blocks,
-            channels=channels
+            input_channels=input_channels,
+            res_channels=res_channels,
+            dropout_rate=dropout_rate
         )
         
         # 加载模型状态字典
@@ -48,13 +50,17 @@ class AIPlayer:
 def human_vs_ai():
     # 加载模型以获取棋盘参数
     try:
-        model_path = "checkpoint/final_model.pth"
-
+        # 尝试加载纯自我对弈训练的最佳模型
+        model_path = "pure_selfplay_checkpoint/best_model.pth"
+        if not torch.load(model_path, map_location=torch.device('cpu')):
+            raise FileNotFoundError
+        
         checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
         board_size = checkpoint.get('board_size', 3)
-        win_length = checkpoint.get('win_length', 3)
+        win_length = 3  # 井字棋固定为3
     except FileNotFoundError:
-        print("Error: 未找到模型文件，请先运行trainer.py训练模型")
+        print("Error: 未找到模型文件 pure_selfplay_checkpoint/best_model.pth")
+        print("请先运行 python pure_selfplay_trainer.py 训练模型")
         return
     
     # 初始化游戏，传入棋盘大小和获胜条件
