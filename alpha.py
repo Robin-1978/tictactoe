@@ -28,7 +28,7 @@ import os
 import shutil
 from collections import deque, defaultdict
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 import numpy as np
 import torch
@@ -215,7 +215,229 @@ class MCTSConfig:
     dirichlet_eps: float = 0.25
     temp_moves: int = 2  # moves before temperature -> 0 (修复：从5减少到2)
 
+class BatchMCTS:
+    """批量MCTS：充分利用GPU并行计算多个游戏状态"""
+    def __init__(self, net: AZNet, cfg: MCTSConfig, device: torch.device):
+        self.net = net
+        self.cfg = cfg
+        self.device = device
+        
+    def batch_run_games(self, games: List[TicTacToe], move_counts: List[int]) -> List[np.ndarray]:
+        """批量运行多个游戏的MCTS搜索"""
+        batch_size = len(games)
+        results = []
+        
+        # 为每个游戏创建独立的搜索状态
+        searches = []
+        for i in range(batch_size):
+            search_state = {
+                'P': {},  # prior
+                'N': defaultdict(int),
+                'W': defaultdict(float), 
+                'Q': defaultdict(float),
+                'children': defaultdict(list),
+                'terminal': {},
+                'legal': {}
+            }
+            searches.append(search_state)
+        
+        # 批量初始expand
+        expand_requests = []
+        for i, game in enumerate(games):
+            key = self._state_key(game)
+            expand_requests.append((i, game, key))
+        
+        values = self._batch_expand(expand_requests, searches)
+        
+        # 为每个游戏添加Dirichlet噪声（如果是开局）
+        for i, (game, move_count) in enumerate(zip(games, move_counts)):
+            if move_count == 0:
+                key = self._state_key(game)
+                self._add_dirichlet(searches[i], key)
+        
+        # 运行MCTS模拟
+        for sim in range(self.cfg.sims):
+            # 收集需要expand的请求
+            expand_requests = []
+            paths_to_backup = []  # 需要backup的路径
+            
+            for i, game in enumerate(games):
+                # 模拟一条路径
+                path, need_expand = self._simulate_path(game, searches[i])
+                if need_expand:
+                    game_state, key = need_expand
+                    expand_requests.append((i, game_state, key))
+                    paths_to_backup.append((i, path, game))
+            
+            # 批量expand
+            if expand_requests:
+                values = self._batch_expand(expand_requests, searches)
+                
+                # 对每个expand的路径进行backup
+                for i, path, game in paths_to_backup:
+                    if i in values:
+                        v = values[i]
+                        self._backup(searches[i], path, v, game.current_player)
+        
+        # 构建每个游戏的策略
+        for i, game in enumerate(games):
+            key = self._state_key(game)
+            move_count = move_counts[i]
+            pi = self._build_policy(searches[i], key, move_count)
+            results.append(pi)
+        
+        return results
+    
+    def _state_key(self, game: TicTacToe) -> Tuple:
+        return (tuple(game.board.reshape(-1)), game.current_player)
+    
+    def _batch_expand(self, expand_requests: List[Tuple[int, TicTacToe, Tuple]], searches: List[Dict]) -> Dict[int, float]:
+        """批量expand多个状态"""
+        if not expand_requests:
+            return {}
+            
+        # 批量编码和推理
+        games = [game for _, game, _ in expand_requests]
+        planes_batch = np.stack([game.encode() for game in games])
+        
+        with torch.no_grad():
+            p_logits_batch, v_batch = self.net(torch.from_numpy(planes_batch).to(self.device))
+            v_batch = v_batch.squeeze().cpu().numpy()  # 修复：squeeze()会处理所有维度
+            p_logits_batch = p_logits_batch.cpu().numpy()
+        
+        # 处理结果
+        values = {}
+        for idx, (search_idx, game, key) in enumerate(expand_requests):
+            search = searches[search_idx]
+            legal = game.legal_moves()
+            
+            # 处理策略
+            mask = np.full(9, float('-inf'))
+            mask[legal] = 0.0
+            p_logits = p_logits_batch[idx] + mask
+            
+            # 修复数值稳定性
+            p = np.full(9, 0.0)
+            if len(legal) > 0:
+                p_logits_max = np.max(p_logits[legal])  # 只在合法位置计算max
+                exp_logits = np.exp(p_logits[legal] - p_logits_max)
+                exp_sum = np.sum(exp_logits)
+                if exp_sum > 0:
+                    p[legal] = exp_logits / exp_sum
+                else:
+                    p[legal] = 1.0 / len(legal)  # 均匀分布作为备选
+            # 如果没有合法位置（游戏结束），p保持全0
+            
+            # 存储
+            search['P'][key] = p
+            search['legal'][key] = legal
+            search['children'][key] = legal
+            search['terminal'][key] = game.result()
+            
+            # 修复v_batch索引问题
+            if v_batch.ndim == 0:  # 单个样本
+                values[search_idx] = float(v_batch)
+            else:  # 多个样本
+                values[search_idx] = float(v_batch[idx])
+        
+        return values
+    
+    def _add_dirichlet(self, search: Dict, root_key: Tuple):
+        """添加Dirichlet噪声"""
+        alpha = self.cfg.dirichlet_alpha
+        eps = self.cfg.dirichlet_eps
+        p = search['P'][root_key].copy()
+        legal = search['legal'][root_key]
+        noise = np.random.dirichlet([alpha]*len(legal))
+        p_new = p.copy()
+        for i, a in enumerate(legal):
+            p_new[a] = (1-eps)*p[a] + eps*noise[i]
+        search['P'][root_key] = p_new
+    
+    def _simulate_path(self, root: TicTacToe, search: Dict):
+        """模拟一条路径，返回需要expand的状态"""
+        path = []
+        game = root.clone()
+        
+        while True:
+            key = self._state_key(game)
+            
+            # 检查终止
+            term = search['terminal'].get(key, None)
+            if term is not None:
+                v = 0.0 if term == 0 else (1.0 if term == game.current_player else -1.0)
+                self._backup(search, path, v, root.current_player)
+                return path, None
+            
+            # 检查是否需要expand
+            if key not in search['P']:
+                return path, (game, key)
+            
+            # 选择行动
+            action = self._select_action(search, key)
+            path.append((key, action))  # 记录状态和选择的动作
+            game.play(action)
+        
+    def _select_action(self, search: Dict, key: Tuple) -> int:
+        """使用PUCT选择行动"""
+        total_N = sum(search['N'][(key, a)] for a in search['children'][key])
+        best, best_u = None, -1e9
+        
+        for a in search['children'][key]:
+            q = search['Q'][(key, a)]
+            p = search['P'][key][a]
+            u = q + self.cfg.c_puct * p * math.sqrt(total_N + 1) / (1 + search['N'][(key, a)])
+            if u > best_u:
+                best_u, best = u, a
+        
+        return best
+    
+    def _backup(self, search: Dict, path: List, v: float, root_player: int):
+        """回传价值"""
+        # 沿路径反向传播价值
+        for key, action in reversed(path):
+            # 更新访问计数
+            search['N'][(key, action)] += 1
+            
+            # 根据当前节点的玩家计算价值方向
+            # v是从叶子节点视角的价值，需要转换到当前节点视角
+            search['W'][(key, action)] += v
+            
+            # 更新Q值（平均价值）
+            if search['N'][(key, action)] > 0:
+                search['Q'][(key, action)] = search['W'][(key, action)] / search['N'][(key, action)]
+            
+            # 切换价值符号（因为玩家交替）
+            v = -v
+    
+    def _build_policy(self, search: Dict, key: Tuple, move_count: int) -> np.ndarray:
+        """构建策略分布"""
+        counts = np.zeros(9, dtype=np.float32)
+        if key in search['legal']:
+            for a in search['legal'][key]:
+                counts[a] = search['N'][(key, a)]
+        
+        # 温度控制
+        if move_count < self.cfg.temp_moves:
+            pi = counts ** 1.0
+        else:
+            pi = np.zeros_like(counts)
+            if counts.sum() > 0:
+                pi[np.argmax(counts)] = 1.0
+        
+        if pi.sum() > 0:
+            pi = pi / pi.sum()
+        else:
+            # 如果没有访问记录，使用均匀分布
+            if key in search['legal']:
+                legal = search['legal'][key]
+                pi = np.zeros(9, dtype=np.float32)
+                pi[legal] = 1.0 / len(legal)
+        
+        return pi
+
 class MCTS:
+    """原有的MCTS类，保持向后兼容"""
     def __init__(self, net: AZNet, cfg: MCTSConfig, device: torch.device):
         self.net = net
         self.cfg = cfg
@@ -454,6 +676,77 @@ class MinimaxTicTacToe:
 # Self-play & Training
 # =====================
 
+def batch_self_play_games(net: AZNet, mcts_cfg: MCTSConfig, n_games: int, device: torch.device, batch_size: int = 32) -> List[Tuple[List[np.ndarray], List[np.ndarray], int, List[int]]]:
+    """批量自对弈：充分利用GPU并行计算"""
+    net.eval()
+    all_games = []
+    batch_mcts = BatchMCTS(net, mcts_cfg, device)
+    
+    # 分批处理
+    for batch_start in range(0, n_games, batch_size):
+        batch_end = min(batch_start + batch_size, n_games)
+        current_batch_size = batch_end - batch_start
+        
+        # 初始化当前批次的游戏
+        games = [TicTacToe() for _ in range(current_batch_size)]
+        batch_states = [[] for _ in range(current_batch_size)]
+        batch_pis = [[] for _ in range(current_batch_size)]
+        batch_players = [[] for _ in range(current_batch_size)]
+        move_counts = [0] * current_batch_size
+        
+        # 进行游戏直到所有游戏结束
+        active_games = list(range(current_batch_size))
+        
+        while active_games:
+            # 获取活跃游戏状态
+            active_game_objects = [games[i] for i in active_games]
+            active_move_counts = [move_counts[i] for i in active_games]
+            
+            # 批量MCTS推理
+            pis = batch_mcts.batch_run_games(active_game_objects, active_move_counts)
+            
+            # 处理每个活跃游戏
+            new_active_games = []
+            for idx, game_idx in enumerate(active_games):
+                game = games[game_idx]
+                pi = pis[idx]
+                
+                # 记录状态和策略
+                batch_states[game_idx].append(game.encode())
+                batch_pis[game_idx].append(pi.astype(np.float32))
+                batch_players[game_idx].append(game.current_player)
+                
+                # 选择行动
+                legal = game.legal_moves()
+                probs = np.array([pi[a] for a in legal], dtype=np.float32)
+                if probs.sum() <= 0:
+                    probs = np.ones(len(legal), dtype=np.float32) / len(legal)
+                probs = probs / probs.sum()
+                a = np.random.choice(legal, p=probs)
+                
+                # 执行行动
+                game.play(a)
+                move_counts[game_idx] += 1
+                
+                # 检查游戏是否结束
+                res = game.result()
+                if res is None:
+                    new_active_games.append(game_idx)
+                else:
+                    # 游戏结束，记录结果
+                    all_games.append((
+                        batch_states[game_idx],
+                        batch_pis[game_idx], 
+                        res,
+                        batch_players[game_idx]
+                    ))
+            
+            active_games = new_active_games
+        
+        print(f"  批量自对弈: 完成 {batch_end}/{n_games} 局游戏")
+    
+    return all_games
+
 def self_play_games(net: AZNet, mcts_cfg: MCTSConfig, n_games: int, device: torch.device) -> List[Tuple[List[np.ndarray], List[np.ndarray], int, List[int]]]:
     net.eval()
     games = []
@@ -546,6 +839,10 @@ def main():
     ap.add_argument('--epochs-per-iter', type=int, default=1)
     ap.add_argument('--mcts-sims', type=int, default=100)
     ap.add_argument('--mcts-temp-moves', type=int, default=2)
+    ap.add_argument('--net-channels', type=int, default=32, help='网络通道数')
+    ap.add_argument('--net-blocks', type=int, default=2, help='残差块数量')
+    ap.add_argument('--batch-mcts', action='store_true', help='使用批量MCTS（GPU加速）')
+    ap.add_argument('--batch-size-mcts', type=int, default=32, help='批量MCTS的批次大小')
     ap.add_argument('--lr', type=float, default=1e-3)
     ap.add_argument('--weight-decay', type=float, default=1e-4)
     ap.add_argument('--device', type=str, default='cpu')
@@ -561,7 +858,7 @@ def main():
 
     device = torch.device(args.device if torch.cuda.is_available() or args.device=='cpu' else 'cpu')
 
-    net = AZNet(in_ch=5, ch=32, nblocks=2).to(device)
+    net = AZNet(in_ch=5, ch=args.net_channels, nblocks=args.net_blocks).to(device)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
     # 加载预训练模型（如果指定）
@@ -589,7 +886,11 @@ def main():
     for it in range(start_iter, start_iter + args.iters):
         # Self-play
         mcfg = MCTSConfig(sims=args.mcts_sims, c_puct=1.5, dirichlet_alpha=0.3, dirichlet_eps=0.25, temp_moves=args.mcts_temp_moves)
-        games = self_play_games(net, mcfg, args.games_per_iter, device)
+        if args.batch_mcts:
+            print(f"  使用批量MCTS (批次大小: {args.batch_size_mcts})")
+            games = batch_self_play_games(net, mcfg, args.games_per_iter, device, args.batch_size_mcts)
+        else:
+            games = self_play_games(net, mcfg, args.games_per_iter, device)
         for states, pis, winner, players in games:
             buf.push_game(states, pis, winner, players)
         print(f"[Iter {it}] buffer size after self-play: {len(buf)}")
